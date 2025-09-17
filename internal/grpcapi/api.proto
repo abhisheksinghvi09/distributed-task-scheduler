@@ -32,7 +32,7 @@ service CoordinatorService {
     // Sends a task request to the coordinator
     rpc SubmitTask (ClientTaskRequest) returns (ClientTaskResponse) {}
     // Sends a heartbeat to the server
-    rpc SendHeartbeat (HeartbeatRequest) returns (HeartbeatRespone) {}
+    rpc SendHeartbeat (HeartbeatRequest) returns (HeartbeatResponse) {}
     // Updates a Task Status
     rpc UpdateTaskStatus (UpdateTaskStatusRequest) returns (UpdateTaskStatusResponse) {}
 }
@@ -51,7 +51,7 @@ message HeartbeatRequest {
     string address = 2;
 }
 
-message HeartbeatRespone {
+message HeartbeatResponse {
     bool acknowledged = 1;
 }
 

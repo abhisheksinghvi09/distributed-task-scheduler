@@ -139,7 +139,7 @@ type CoordinatorServiceClient interface {
 	// Sends a task request to the coordinator
 	SubmitTask(ctx context.Context, in *ClientTaskRequest, opts ...grpc.CallOption) (*ClientTaskResponse, error)
 	// Sends a heartbeat to the server
-	SendHeartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatRespone, error)
+	SendHeartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	// Updates a Task Status
 	UpdateTaskStatus(ctx context.Context, in *UpdateTaskStatusRequest, opts ...grpc.CallOption) (*UpdateTaskStatusResponse, error)
 }
@@ -162,9 +162,9 @@ func (c *coordinatorServiceClient) SubmitTask(ctx context.Context, in *ClientTas
 	return out, nil
 }
 
-func (c *coordinatorServiceClient) SendHeartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatRespone, error) {
+func (c *coordinatorServiceClient) SendHeartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(HeartbeatRespone)
+	out := new(HeartbeatResponse)
 	err := c.cc.Invoke(ctx, CoordinatorService_SendHeartbeat_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -189,7 +189,7 @@ type CoordinatorServiceServer interface {
 	// Sends a task request to the coordinator
 	SubmitTask(context.Context, *ClientTaskRequest) (*ClientTaskResponse, error)
 	// Sends a heartbeat to the server
-	SendHeartbeat(context.Context, *HeartbeatRequest) (*HeartbeatRespone, error)
+	SendHeartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	// Updates a Task Status
 	UpdateTaskStatus(context.Context, *UpdateTaskStatusRequest) (*UpdateTaskStatusResponse, error)
 	mustEmbedUnimplementedCoordinatorServiceServer()
@@ -205,7 +205,7 @@ type UnimplementedCoordinatorServiceServer struct{}
 func (UnimplementedCoordinatorServiceServer) SubmitTask(context.Context, *ClientTaskRequest) (*ClientTaskResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitTask not implemented")
 }
-func (UnimplementedCoordinatorServiceServer) SendHeartbeat(context.Context, *HeartbeatRequest) (*HeartbeatRespone, error) {
+func (UnimplementedCoordinatorServiceServer) SendHeartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SendHeartbeat not implemented")
 }
 func (UnimplementedCoordinatorServiceServer) UpdateTaskStatus(context.Context, *UpdateTaskStatusRequest) (*UpdateTaskStatusResponse, error) {

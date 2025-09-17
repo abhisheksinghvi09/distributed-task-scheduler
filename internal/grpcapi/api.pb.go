@@ -335,27 +335,27 @@ func (x *HeartbeatRequest) GetAddress() string {
 	return ""
 }
 
-type HeartbeatRespone struct {
+type HeartbeatResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Acknowledged  bool                   `protobuf:"varint,1,opt,name=acknowledged,proto3" json:"acknowledged,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *HeartbeatRespone) Reset() {
-	*x = HeartbeatRespone{}
+func (x *HeartbeatResponse) Reset() {
+	*x = HeartbeatResponse{}
 	mi := &file_api_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *HeartbeatRespone) String() string {
+func (x *HeartbeatResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*HeartbeatRespone) ProtoMessage() {}
+func (*HeartbeatResponse) ProtoMessage() {}
 
-func (x *HeartbeatRespone) ProtoReflect() protoreflect.Message {
+func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_api_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -367,12 +367,12 @@ func (x *HeartbeatRespone) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use HeartbeatRespone.ProtoReflect.Descriptor instead.
-func (*HeartbeatRespone) Descriptor() ([]byte, []int) {
+// Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
+func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
 	return file_api_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *HeartbeatRespone) GetAcknowledged() bool {
+func (x *HeartbeatResponse) GetAcknowledged() bool {
 	if x != nil {
 		return x.Acknowledged
 	}
@@ -518,8 +518,8 @@ const file_api_proto_rawDesc = "" +
 	"\atask_id\x18\x03 \x01(\tR\x06taskId\"H\n" +
 	"\x10HeartbeatRequest\x12\x1a\n" +
 	"\bworkerId\x18\x01 \x01(\rR\bworkerId\x12\x18\n" +
-	"\aaddress\x18\x02 \x01(\tR\aaddress\"6\n" +
-	"\x10HeartbeatRespone\x12\"\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"7\n" +
+	"\x11HeartbeatResponse\x12\"\n" +
 	"\facknowledged\x18\x01 \x01(\bR\facknowledged\"\xbe\x01\n" +
 	"\x17UpdateTaskStatusRequest\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12+\n" +
@@ -540,11 +540,11 @@ const file_api_proto_rawDesc = "" +
 	"\x06FAILED\x10\x032L\n" +
 	"\rWorkerService\x12;\n" +
 	"\n" +
-	"SubmitTask\x12\x14.grpcapi.TaskRequest\x1a\x15.grpcapi.TaskResponse\"\x002\x81\x02\n" +
+	"SubmitTask\x12\x14.grpcapi.TaskRequest\x1a\x15.grpcapi.TaskResponse\"\x002\x82\x02\n" +
 	"\x12CoordinatorService\x12G\n" +
 	"\n" +
-	"SubmitTask\x12\x1a.grpcapi.ClientTaskRequest\x1a\x1b.grpcapi.ClientTaskResponse\"\x00\x12G\n" +
-	"\rSendHeartbeat\x12\x19.grpcapi.HeartbeatRequest\x1a\x19.grpcapi.HeartbeatRespone\"\x00\x12Y\n" +
+	"SubmitTask\x12\x1a.grpcapi.ClientTaskRequest\x1a\x1b.grpcapi.ClientTaskResponse\"\x00\x12H\n" +
+	"\rSendHeartbeat\x12\x19.grpcapi.HeartbeatRequest\x1a\x1a.grpcapi.HeartbeatResponse\"\x00\x12Y\n" +
 	"\x10UpdateTaskStatus\x12 .grpcapi.UpdateTaskStatusRequest\x1a!.grpcapi.UpdateTaskStatusResponse\"\x00B>Z<github.com/abhisheksinghvi09/task-scheduler/internal/grpcapib\x06proto3"
 
 var (
@@ -568,7 +568,7 @@ var file_api_proto_goTypes = []any{
 	(*ClientTaskRequest)(nil),        // 3: grpcapi.ClientTaskRequest
 	(*ClientTaskResponse)(nil),       // 4: grpcapi.ClientTaskResponse
 	(*HeartbeatRequest)(nil),         // 5: grpcapi.HeartbeatRequest
-	(*HeartbeatRespone)(nil),         // 6: grpcapi.HeartbeatRespone
+	(*HeartbeatResponse)(nil),        // 6: grpcapi.HeartbeatResponse
 	(*UpdateTaskStatusRequest)(nil),  // 7: grpcapi.UpdateTaskStatusRequest
 	(*UpdateTaskStatusResponse)(nil), // 8: grpcapi.UpdateTaskStatusResponse
 }
@@ -580,7 +580,7 @@ var file_api_proto_depIdxs = []int32{
 	7, // 4: grpcapi.CoordinatorService.UpdateTaskStatus:input_type -> grpcapi.UpdateTaskStatusRequest
 	2, // 5: grpcapi.WorkerService.SubmitTask:output_type -> grpcapi.TaskResponse
 	4, // 6: grpcapi.CoordinatorService.SubmitTask:output_type -> grpcapi.ClientTaskResponse
-	6, // 7: grpcapi.CoordinatorService.SendHeartbeat:output_type -> grpcapi.HeartbeatRespone
+	6, // 7: grpcapi.CoordinatorService.SendHeartbeat:output_type -> grpcapi.HeartbeatResponse
 	8, // 8: grpcapi.CoordinatorService.UpdateTaskStatus:output_type -> grpcapi.UpdateTaskStatusResponse
 	5, // [5:9] is the sub-list for method output_type
 	1, // [1:5] is the sub-list for method input_type
