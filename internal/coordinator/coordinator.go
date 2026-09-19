@@ -1,11 +1,14 @@
+// Package coordinator relays pending tasks onto NATS JetStream and recovers
+// work abandoned by a dead worker or a lost dispatch message. Postgres is
+// the sole source of truth for every task's state; JetStream is a wake-up
+// signal carrying a task id, never the payload, never the claim -- see
+// internal/queue and internal/task for the full architecture rationale.
 package coordinator
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"log"
-	"net"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -13,54 +16,55 @@ import (
 	"time"
 
 	"github.com/abhisheksinghvi09/task-scheduler/internal/common"
-	pb "github.com/abhisheksinghvi09/task-scheduler/internal/grpcapi"
-	"github.com/google/uuid"
+	"github.com/abhisheksinghvi09/task-scheduler/internal/db"
+	"github.com/abhisheksinghvi09/task-scheduler/internal/metrics"
+	"github.com/abhisheksinghvi09/task-scheduler/internal/queue"
+	"github.com/abhisheksinghvi09/task-scheduler/internal/task"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
-	shudownTimeout   = 5 * time.Second
-	defaultMaxMisses = 1
-	scanInterval     = 10 * time.Second
+	relayInterval      = 1 * time.Second
+	relayBatchSize     = 100
+	reapInterval       = 10 * time.Second
+	queueDepthInterval = 5 * time.Second
+	cronInterval       = 1 * time.Second
+	cronAdvisoryLock   = 424243
+	// defaultQueuedGrace is how long a task may sit 'queued' (published,
+	// not yet claimed) before the reaper assumes the dispatch was lost and
+	// returns it to pending. Kept on the same order as NATS's own AckWait
+	// (see internal/queue), not several times longer -- ClaimByID's atomic
+	// "WHERE status='queued'" check makes it safe for this reaper pass and
+	// a stale, still-in-flight redelivery to race: whichever arrives second
+	// simply finds the row no longer claimable and is a no-op.
+	defaultQueuedGrace = 60 * time.Second
+	reaperAdvisoryLock = 424242
 )
 
 type CoordinatorServer struct {
-	pb.UnimplementedCoordinatorServiceServer
-	serverPort          string
-	listener            net.Listener
-	grpcServer          *grpc.Server
-	WorkerPool          map[uint32]*workerInfo
-	WorkerPoolMutex     sync.Mutex
-	WorkerPoolKeys      []uint32
-	WorkerPoolKeysMutex sync.RWMutex
-	maxHeartbeatMisses  uint8
-	heartbeatInterval   time.Duration
-	roundRobinIndex     uint32
-	dbConnectionString  string
-	dbPool              *pgxpool.Pool
-	ctx                 context.Context    // The root context for all goroutines
-	cancel              context.CancelFunc // The function to to cancel the context
-	wg                  sync.WaitGroup     // WaithGroup to wait for all goroutines to finish
-}
-
-type workerInfo struct {
-	heartbeatMisses     uint8
-	address             string
-	grpcConnection      *grpc.ClientConn
-	workerServiceClient pb.WorkerServiceClient
+	dbConnectionString string
+	natsURL            string
+	httpAddr           string
+	queuedGrace        time.Duration
+	dbPool             *pgxpool.Pool
+	natsClient         *queue.Client
+	httpServer         *http.Server
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
 }
 
 // NewServer initializes and returns a new Server instance.
-func NewServer(port string, dbConnectionString string) *CoordinatorServer {
+func NewServer(dbConnectionString, natsURL, httpAddr string, queuedGrace time.Duration) *CoordinatorServer {
 	ctx, cancel := context.WithCancel(context.Background())
+	if queuedGrace <= 0 {
+		queuedGrace = defaultQueuedGrace
+	}
 	return &CoordinatorServer{
-		WorkerPool:         make(map[uint32]*workerInfo),
-		maxHeartbeatMisses: defaultMaxMisses,
-		heartbeatInterval:  common.DefaultHeartbeat,
 		dbConnectionString: dbConnectionString,
-		serverPort:         port,
+		natsURL:            natsURL,
+		httpAddr:           httpAddr,
+		queuedGrace:        queuedGrace,
 		ctx:                ctx,
 		cancel:             cancel,
 	}
@@ -69,39 +73,41 @@ func NewServer(port string, dbConnectionString string) *CoordinatorServer {
 // Start initiates the server's operation.
 func (s *CoordinatorServer) Start() error {
 	var err error
-	go s.manageWorkerPool()
-	if err = s.startGRPCServer(); err != nil {
-		return fmt.Errorf("gRPC server start failed: %w", err)
-	}
-
 	s.dbPool, err = common.ConnectToDatabase(s.ctx, s.dbConnectionString)
 	if err != nil {
 		return err
 	}
 
-	go s.scanDatabase()
+	if err := db.Migrate(s.ctx, s.dbPool); err != nil {
+		return err
+	}
+
+	s.natsClient, err = queue.Connect(s.ctx, s.natsURL)
+	if err != nil {
+		return err
+	}
+	if err := s.natsClient.EnsureStream(s.ctx); err != nil {
+		return err
+	}
+
+	s.startHTTPServer()
+	go s.relayLoop()
+	go s.reaperLoop()
+	go s.queueDepthLoop()
+	go s.cronLoop()
 
 	return s.awaitShutdown()
 }
 
-func (s *CoordinatorServer) startGRPCServer() error {
-	var err error
-	s.listener, err = net.Listen("tcp", s.serverPort)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Starting gRPC server on %s\n", s.serverPort)
-	s.grpcServer = grpc.NewServer()
-	pb.RegisterCoordinatorServiceServer(s.grpcServer, s)
-
+func (s *CoordinatorServer) startHTTPServer() {
+	mux := metrics.Mux(metrics.DBReady(s.dbPool))
+	s.httpServer = &http.Server{Addr: s.httpAddr, Handler: mux}
 	go func() {
-		if err := s.grpcServer.Serve(s.listener); err != nil {
-			log.Fatalf("gRPC server failed: %v", err)
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("coordinator: metrics server failed", "error", err)
 		}
 	}()
-
-	return nil
+	slog.Info("coordinator: metrics server listening", "addr", s.httpAddr)
 }
 
 func (s *CoordinatorServer) awaitShutdown() error {
@@ -114,253 +120,145 @@ func (s *CoordinatorServer) awaitShutdown() error {
 
 // Stop gracefully shuts down the server.
 func (s *CoordinatorServer) Stop() error {
-	// Signal all goroutines to stop
 	s.cancel()
-	// Wait for all goroutines to finish
 	s.wg.Wait()
 
-	s.WorkerPoolMutex.Lock()
-	defer s.WorkerPoolMutex.Unlock()
-	for _, worker := range s.WorkerPool {
-		if worker.grpcConnection != nil {
-			worker.grpcConnection.Close()
-		}
+	if s.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.httpServer.Shutdown(ctx)
+	}
+	if s.natsClient != nil {
+		s.natsClient.Close()
+	}
+	if s.dbPool != nil {
+		s.dbPool.Close()
 	}
 
-	if s.grpcServer != nil {
-		s.grpcServer.GracefulStop()
-	}
-
-	if s.listener != nil {
-		return s.listener.Close()
-	}
-
-	s.dbPool.Close()
 	return nil
 }
 
-func (s *CoordinatorServer) SubmitTask(ctx context.Context, in *pb.ClientTaskRequest) (*pb.ClientTaskResponse, error) {
-	data := in.GetData()
-	taskId := uuid.New().String()
-	task := &pb.TaskRequest{
-		TaskId: taskId,
-		Data:   data,
-	}
-
-	if err := s.submitTaskToWorker(task); err != nil {
-		return nil, err
-	}
-
-	return &pb.ClientTaskResponse{
-		Message: "Task submitted successfully",
-		TaskId:  taskId,
-	}, nil
-}
-
-func (s *CoordinatorServer) UpdateTaskStatus(ctx context.Context, req *pb.UpdateTaskStatusRequest) (*pb.UpdateTaskStatusResponse, error) {
-	status := req.GetStatus()
-	taskId := req.GetTaskId()
-
-	var timestamp time.Time
-	var column string
-
-	switch status {
-	case pb.TaskStatus_STARTED:
-		timestamp = time.Unix(req.GetStartedAt(), 0)
-		column = "started_at"
-	case pb.TaskStatus_COMPLETE:
-		timestamp = time.Unix(req.GetCompletedAt(), 0)
-		column = "completed_at"
-	case pb.TaskStatus_FAILED:
-		timestamp = time.Unix(req.GetFailedAt(), 0)
-		column = "failed_at"
-	default:
-		log.Println("Invalid status in UpdateStatusRequest")
-		return nil, errors.ErrUnsupported
-	}
-
-	sqlStatement := fmt.Sprintf("UPDATE tasks SET %s = $1 WHERE id = $2", column)
-	_, err := s.dbPool.Exec(ctx, sqlStatement, timestamp, taskId)
-	if err != nil {
-		log.Printf("Could not update task status for task %s: %+v", taskId, err)
-		return nil, err
-	}
-
-	return &pb.UpdateTaskStatusResponse{Success: true}, nil
-}
-
-func (s *CoordinatorServer) getNextWorker() *workerInfo {
-	s.WorkerPoolKeysMutex.RLock()
-	defer s.WorkerPoolKeysMutex.RUnlock()
-
-	workerCount := len(s.WorkerPoolKeys)
-	if workerCount == 0 {
-		return nil
-	}
-
-	worker := s.WorkerPool[s.WorkerPoolKeys[s.roundRobinIndex%uint32(workerCount)]]
-	s.roundRobinIndex++
-	return worker
-}
-
-func (s *CoordinatorServer) submitTaskToWorker(task *pb.TaskRequest) error {
-	worker := s.getNextWorker()
-	if worker == nil {
-		return errors.New("no workers available")
-	}
-
-	_, err := worker.workerServiceClient.SubmitTask(context.Background(), task)
-	return err
-}
-
-func (s *CoordinatorServer) SendHeartbeat(ctx context.Context, in *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
-	s.WorkerPoolMutex.Lock()
-	defer s.WorkerPoolMutex.Unlock()
-
-	workerID := in.GetWorkerId()
-
-	if worker, ok := s.WorkerPool[workerID]; ok {
-		// log.Println("Reset hearbeat miss for worker:", workerID)
-		worker.heartbeatMisses = 0
-	} else {
-		log.Println("Registering worker:", workerID)
-		conn, err := grpc.Dial(in.GetAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			return nil, err
-		}
-
-		s.WorkerPool[workerID] = &workerInfo{
-			address:             in.GetAddress(),
-			grpcConnection:      conn,
-			workerServiceClient: pb.NewWorkerServiceClient(conn),
-		}
-
-		s.WorkerPoolKeysMutex.Lock()
-		defer s.WorkerPoolKeysMutex.Unlock()
-
-		workerCount := len(s.WorkerPool)
-		s.WorkerPoolKeys = make([]uint32, 0, workerCount)
-		for k := range s.WorkerPool {
-			s.WorkerPoolKeys = append(s.WorkerPoolKeys, k)
-		}
-
-		log.Println("Registered worker:", workerID)
-	}
-
-	return &pb.HeartbeatResponse{Acknowledged: true}, nil
-}
-
-func (s *CoordinatorServer) scanDatabase() {
-	ticker := time.NewTicker(scanInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			go s.executeAllScheduledTasks()
-		case <-s.ctx.Done():
-			log.Println("Shutting down database scanner.")
-			return
-		}
-	}
-}
-
-func (s *CoordinatorServer) executeAllScheduledTasks() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	tx, err := s.dbPool.Begin(ctx)
-	if err != nil {
-		log.Printf("Unable to start transaction: %v\n", err)
-		return
-	}
-
-	defer func() {
-		if err := tx.Rollback(ctx); err != nil && err.Error() != "tx is closed" {
-			log.Printf("ERROR: %#v", err)
-			log.Printf("Failed to rollback transaction: %v\n", err)
-		}
-	}()
-
-	rows, err := tx.Query(ctx, `SELECT id, command FROM tasks WHERE scheduled_at < (NOW() + INTERVAL '30 seconds') AND picked_at IS NULL ORDER BY scheduled_at FOR UPDATE SKIP LOCKED`)
-	if err != nil {
-		log.Printf("Error executing query: %v\n", err)
-		return
-	}
-	defer rows.Close()
-
-	var tasks []*pb.TaskRequest
-	for rows.Next() {
-		var id, command string
-		if err := rows.Scan(&id, &command); err != nil {
-			log.Printf("Failed to scan row: %v\n", err)
-			continue
-		}
-
-		tasks = append(tasks, &pb.TaskRequest{TaskId: id, Data: command})
-	}
-
-	if err := rows.Err(); err != nil {
-		log.Printf("Error iterating rows: %v\n", err)
-		return
-	}
-
-	for _, task := range tasks {
-		if err := s.submitTaskToWorker(task); err != nil {
-			log.Printf("Failed to submit task %s: %v\n", task.GetTaskId(), err)
-			continue
-		}
-
-		if _, err := tx.Exec(ctx, `UPDATE tasks SET picked_at = NOW() WHERE id = $1`, task.GetTaskId()); err != nil {
-			log.Printf("Failed to update task %s: %v\n", task.GetTaskId(), err)
-			continue
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
-	}
-}
-
-func (s *CoordinatorServer) manageWorkerPool() {
+// relayLoop moves eligible tasks from pending to queued and publishes each
+// to NATS. Publish happens after MarkQueued's transaction has committed,
+// never inside it. A publish failure leaves the row in queued; the
+// reaper's queued-timeout pass returns it to pending within one reaper
+// interval -- a bounded, self-healing gap, not a bug to solve with a
+// distributed transaction.
+func (s *CoordinatorServer) relayLoop() {
 	s.wg.Add(1)
 	defer s.wg.Done()
 
-	ticker := time.NewTicker(time.Duration(s.maxHeartbeatMisses) * s.heartbeatInterval)
+	ticker := time.NewTicker(relayInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			s.removeInactiveWorkers()
+			s.relayOnce()
 		case <-s.ctx.Done():
 			return
 		}
 	}
 }
 
-func (s *CoordinatorServer) removeInactiveWorkers() {
-	s.WorkerPoolMutex.Lock()
-	defer s.WorkerPoolMutex.Unlock()
+func (s *CoordinatorServer) relayOnce() {
+	claimed, err := task.MarkQueued(s.ctx, s.dbPool, relayBatchSize)
+	if err != nil {
+		slog.Error("relay: mark queued failed", "error", err)
+		return
+	}
 
-	for workerID, worker := range s.WorkerPool {
-		if worker.heartbeatMisses > s.maxHeartbeatMisses {
-
-			log.Printf("Removing inactive worker: %d\n", workerID)
-			worker.grpcConnection.Close()
-			delete(s.WorkerPool, workerID)
-
-			s.WorkerPoolKeysMutex.Lock()
-
-			workerCount := len(s.WorkerPool)
-			s.WorkerPoolKeys = make([]uint32, 0, workerCount)
-			for k := range s.WorkerPool {
-				s.WorkerPoolKeys = append(s.WorkerPoolKeys, k)
+	for _, c := range claimed {
+		if err := s.natsClient.Publish(s.ctx, c.Priority, c.ID, c.TaskType); err != nil {
+			slog.Warn("relay: publish failed", "task_id", c.ID, "error", err)
+			metrics.NATSPublishErrorsTotal.Inc()
+			if _, unqErr := task.Unqueue(s.ctx, s.dbPool, c.ID); unqErr != nil {
+				slog.Error("relay: failed to unqueue task after publish failure", "task_id", c.ID, "error", unqErr)
 			}
+		}
+	}
+}
 
-			s.WorkerPoolKeysMutex.Unlock()
-		} else {
-			worker.heartbeatMisses++
+// reaperLoop recovers tasks abandoned by a dead worker (expired lease) and
+// tasks queued for dispatch but never claimed -- a lost or failed publish.
+// Guarded by a Postgres advisory lock so multiple coordinator instances
+// don't reap the same rows redundantly.
+func (s *CoordinatorServer) reaperLoop() {
+	s.wg.Add(1)
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.reapOnce()
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *CoordinatorServer) reapOnce() {
+	start := time.Now()
+
+	var locked bool
+	if err := s.dbPool.QueryRow(s.ctx, "SELECT pg_try_advisory_lock($1)", reaperAdvisoryLock).Scan(&locked); err != nil {
+		slog.Error("reaper: failed to acquire advisory lock", "error", err)
+		return
+	}
+	if !locked {
+		return
+	}
+	defer s.dbPool.Exec(s.ctx, "SELECT pg_advisory_unlock($1)", reaperAdvisoryLock)
+
+	result, err := task.ReapExpired(s.ctx, s.dbPool, s.queuedGrace)
+	metrics.ReaperRunDuration.Observe(time.Since(start).Seconds())
+	if err != nil {
+		slog.Error("reaper", "error", err)
+		return
+	}
+
+	if result.RequeuedFromRunning > 0 {
+		metrics.ReaperReclaimedTotal.WithLabelValues("running").Add(float64(result.RequeuedFromRunning))
+	}
+	if result.RequeuedFromQueued > 0 {
+		metrics.ReaperReclaimedTotal.WithLabelValues("queued").Add(float64(result.RequeuedFromQueued))
+	}
+	if result.DeadLettered > 0 {
+		metrics.ReaperDeadLetteredTotal.Add(float64(result.DeadLettered))
+	}
+	if result.RequeuedFromRunning > 0 || result.RequeuedFromQueued > 0 || result.DeadLettered > 0 {
+		slog.Info("reaper recovered tasks",
+			"requeued_from_running", result.RequeuedFromRunning,
+			"requeued_from_queued", result.RequeuedFromQueued,
+			"dead_lettered", result.DeadLettered)
+	}
+
+	blocked, err := task.BlockOrphaned(s.ctx, s.dbPool)
+	if err != nil {
+		slog.Error("reaper: block orphaned dependents", "error", err)
+		return
+	}
+	if blocked > 0 {
+		slog.Info("reaper blocked tasks with a failed dependency", "count", blocked)
+	}
+}
+
+func (s *CoordinatorServer) queueDepthLoop() {
+	s.wg.Add(1)
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(queueDepthInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			metrics.RefreshQueueDepth(s.ctx, s.dbPool)
+		case <-s.ctx.Done():
+			return
 		}
 	}
 }
