@@ -1,0 +1,76 @@
+{
+  "title": "Task Scheduler",
+  "uid": "task-scheduler",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Queue depth by status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "tasks_queue_depth", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Dispatch latency (p50 / p95) -- the scheduler SLI",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(tasks_dispatch_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(tasks_dispatch_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Task throughput (completed/sec)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "sum(rate(tasks_completed_total[1m])) by (task_type)", "legendFormat": "{{task_type}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Failures and dead-letters",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "sum(rate(tasks_failed_total[1m])) by (error_class)", "legendFormat": "failed: {{error_class}}" },
+        { "expr": "sum(rate(tasks_dead_lettered_total[1m])) by (task_type)", "legendFormat": "dead-lettered: {{task_type}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Reaper recoveries",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(reaper_reclaimed_total[1m])) by (from_status)", "legendFormat": "{{from_status}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Execution duration (p95) by task type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(tasks_execution_duration_seconds_bucket[1m])) by (le, task_type))", "legendFormat": "{{task_type}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Oldest pending task age (seconds)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        { "expr": "tasks_oldest_pending_age_seconds" }
+      ]
+    }
+  ]
+}
