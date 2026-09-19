@@ -1,0 +1,5 @@
+ARG SERVICE
+FROM golang:1.26-alpine
+ARG SERVICE
+COPY bin/${SERVICE} /app
+ENTRYPOINT ["/app"]

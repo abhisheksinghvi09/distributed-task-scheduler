@@ -1,0 +1,5 @@
+web/
+.git/
+data/
+*.md
+.env
