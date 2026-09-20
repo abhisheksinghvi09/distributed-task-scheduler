@@ -1,5 +1,7 @@
 # AutCron
 
+![AutCron Architecture](assets/architecture.png)
+
 A distributed, durable task scheduler and autonomous AI orchestrator in Go.
 Submit a task over HTTP, a coordinator relays it through NATS JetStream to a pool
 of workers, and **Postgres is the durable source of truth** for every task's
@@ -9,6 +11,7 @@ per-tenant API keys, a Next.js dashboard, and a provider-agnostic AI Orchestrato
 layer (supporting Google Gemini and Anthropic Claude) build on top of that foundation.
 
 ## Architecture
+
 
 ```
                                                 Postgres
